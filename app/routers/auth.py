@@ -85,17 +85,19 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         select(Parent).where(Parent.primary_phone == body.phone.strip())
     ).scalar_one_or_none()
 
+    # ✅ استخدم HTTPException بدل return success=False
     if not parent:
-        return {"success": False, "data": None, "message": "رقم الهاتف غير مسجل"}
+        raise HTTPException(status_code=401, detail="رقم الهاتف غير مسجل")
 
     if not verify_password(body.password, parent.password_hash):
-        return {"success": False, "data": None, "message": "كلمة المرور غير صحيحة"}
+        raise HTTPException(status_code=401, detail="كلمة المرور غير صحيحة")
 
     access_token, expires_in = create_access_token(parent.id, parent.full_name)
     refresh_token = create_refresh_token(parent.id)
 
     # تسجيل الجهاز
     if body.device_token:
+        from datetime import datetime
         existing = db.execute(
             select(ParentDevice).where(
                 ParentDevice.parent_id == parent.id,
@@ -103,7 +105,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             )
         ).scalar_one_or_none()
 
-        from datetime import datetime
         now = datetime.utcnow()
         if existing:
             existing.last_login = now
@@ -122,17 +123,14 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             )
         db.commit()
 
-    return ok(
-        {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "expires_in": expires_in,
-            "parent_id": parent.id,
-            "full_name": parent.full_name,
-        },
-        "تم تسجيل الدخول بنجاح",
-    )
-
+    # ✅ الرد الناجح فقط
+    return ok({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_in": expires_in,
+        "parent_id": parent.id,
+        "full_name": parent.full_name,
+    }, "تم تسجيل الدخول بنجاح")
 
 # ============================================================
 # Refresh
