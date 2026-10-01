@@ -7,6 +7,8 @@ from app.models import Parent
 from app.security import hash_password, verify_password
 from app.utils import to_str, ok
 
+from sqlalchemy import text
+from app.sync_utils import build_sync_update_set
 router = APIRouter(prefix="/parents", tags=["Parents"])
 
 
@@ -42,14 +44,29 @@ def update_me(
     parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
+    sets: list[str] = []
+    params: dict = {"id": parent.id}
+
     if body.secondary_phone is not None:
-        parent.secondary_phone = body.secondary_phone.strip() or None
+        sets.append("secondary_phone = :sp")
+        params["sp"] = body.secondary_phone.strip() or None
     if body.address is not None:
-        parent.address = body.address.strip() or None
+        sets.append("address = :addr")
+        params["addr"] = body.address.strip() or None
     if body.job is not None:
-        parent.job = body.job.strip() or None
+        sets.append("job = :job")
+        params["job"] = body.job.strip() or None
+
+    if not sets:
+        return ok({"id": parent.id}, "لا توجد تغييرات")
+
+    sync_sets, sync_params = build_sync_update_set(db, "parents")
+    params.update(sync_params)
+    all_sets = sets + sync_sets
+
+    sql = f"UPDATE parents SET {', '.join(all_sets)} WHERE id = :id"
+    db.execute(text(sql), params)
     db.commit()
-    db.refresh(parent)
     return ok({"id": parent.id}, "تم حفظ البيانات")
 
 
@@ -65,9 +82,17 @@ def change_password(
     if len(body.new_password) < 8:
         raise HTTPException(status_code=400, detail="كلمة المرور الجديدة قصيرة")
 
-    parent.password_hash = hash_password(body.new_password)
+    new_hash = hash_password(body.new_password)
+
+    sync_sets, sync_params = build_sync_update_set(db, "parents")
+    sets = ["password_hash = :ph"] + sync_sets
+    params = {"ph": new_hash, "id": parent.id, **sync_params}
+
+    sql = f"UPDATE parents SET {', '.join(sets)} WHERE id = :id"
+    db.execute(text(sql), params)
     db.commit()
     return ok(True, "تم تغيير كلمة المرور")
+    
 
 
 @router.get("/me/children")
