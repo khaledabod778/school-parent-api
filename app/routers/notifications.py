@@ -1,13 +1,12 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.deps import get_current_parent, get_db
 from app.models import Notification, NotificationLog, Parent
 from app.utils import ok, to_str
-
+from sqlalchemy import func, inspect, select, text
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
@@ -91,19 +90,45 @@ def mark_read(
     parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
-    log = db.execute(
-        select(NotificationLog).where(
-            NotificationLog.notification_id == notification_id,
-            NotificationLog.parent_id == parent.id,
-        )
-    ).scalar_one_or_none()
+    try:
+        now = datetime.utcnow()
 
-    if not log:
-        raise HTTPException(status_code=404, detail="الإشعار غير موجود")
+        # تحقق أن السجل موجود
+        exists = db.execute(
+            text(
+                "SELECT id FROM notification_logs "
+                "WHERE notification_id = :nid AND parent_id = :pid LIMIT 1"
+            ),
+            {"nid": notification_id, "pid": parent.id},
+        ).scalar()
 
-    log.read_at = datetime.utcnow()
-    log.delivery_status = "read"
-    db.commit()
+        if not exists:
+            raise HTTPException(status_code=404, detail="الإشعار غير موجود")
+
+        # ✅ تحديث ديناميكي — يحدّث أعمدة sync إذا وجدت
+        inspector = inspect(db.bind)
+        columns = {c["name"] for c in inspector.get_columns("notification_logs")}
+
+        sets = ["read_at = :now", "delivery_status = 'read'"]
+        params = {"now": now, "id": exists}
+
+        if "sync_updated_at" in columns:
+            sets.append("sync_updated_at = :now")
+        if "sync_version" in columns:
+            # زيادة العداد
+            sets.append("sync_version = COALESCE(sync_version, 0) + 1")
+        if "updated_at" in columns:
+            sets.append("updated_at = :now")
+
+        sql = f"UPDATE notification_logs SET {', '.join(sets)} WHERE id = :id"
+        db.execute(text(sql), params)
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Mark read failed: %s", exc)
+        # لا نُفشل العملية
     return ok(True)
 
 
@@ -112,10 +137,26 @@ def mark_all_read(
     parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
-    now = datetime.utcnow()
-    db.query(NotificationLog).filter(
-        NotificationLog.parent_id == parent.id,
-        NotificationLog.read_at.is_(None),
-    ).update({"read_at": now, "delivery_status": "read"})
-    db.commit()
+    try:
+        now = datetime.utcnow()
+        inspector = inspect(db.bind)
+        columns = {c["name"] for c in inspector.get_columns("notification_logs")}
+
+        sets = ["read_at = :now", "delivery_status = 'read'"]
+        if "sync_updated_at" in columns:
+            sets.append("sync_updated_at = :now")
+        if "sync_version" in columns:
+            sets.append("sync_version = COALESCE(sync_version, 0) + 1")
+        if "updated_at" in columns:
+            sets.append("updated_at = :now")
+
+        sql = (
+            f"UPDATE notification_logs SET {', '.join(sets)} "
+            "WHERE parent_id = :pid AND read_at IS NULL"
+        )
+        db.execute(text(sql), {"now": now, "pid": parent.id})
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Read-all failed: %s", exc)
     return ok(True)
