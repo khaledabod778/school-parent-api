@@ -1,3 +1,10 @@
+"""
+طبقة الأمان — تدعم تنسيق تطبيق سطح المكتب (salt$sha256) و bcrypt للأمان المستقبلي.
+"""
+
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from jose import JWTError, jwt
@@ -9,20 +16,92 @@ settings = get_settings()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    """التحقق من كلمة المرور مقابل hash."""
+# ============================================================
+# كلمات المرور
+# ============================================================
+def _verify_custom_sha256(plain: str, hashed: str) -> bool:
+    """
+    يتحقق من صيغة تطبيق سطح المكتب: salt(32 hex)$sha256(64 hex)
+    يجرب 4 صيغ محتملة لترتيب الـ salt والـ password.
+    """
     try:
-        return pwd_context.verify(plain, hashed)
-    except Exception:
+        salt_hex, stored_hash = hashed.split("$", 1)
+    except ValueError:
         return False
+
+    if len(salt_hex) != 32 or len(stored_hash) != 64:
+        return False
+
+    # الصيغ الأربع المحتملة (نجربها بالترتيب)
+    candidates: list[str] = []
+
+    # 1) sha256(salt_hex + password)
+    candidates.append(
+        hashlib.sha256((salt_hex + plain).encode("utf-8")).hexdigest()
+    )
+    # 2) sha256(password + salt_hex)
+    candidates.append(
+        hashlib.sha256((plain + salt_hex).encode("utf-8")).hexdigest()
+    )
+
+    # 3) sha256(salt_bytes + password)
+    try:
+        salt_bytes = bytes.fromhex(salt_hex)
+        candidates.append(
+            hashlib.sha256(salt_bytes + plain.encode("utf-8")).hexdigest()
+        )
+        # 4) sha256(password + salt_bytes)
+        candidates.append(
+            hashlib.sha256(plain.encode("utf-8") + salt_bytes).hexdigest()
+        )
+    except ValueError:
+        pass
+
+    # استخدام compare_digest لمقاومة timing attacks
+    return any(
+        hmac.compare_digest(candidate, stored_hash) for candidate in candidates
+    )
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    """
+    يتحقق من كلمة المرور مقابل الـ hash.
+    يدعم:
+      - الصيغة المخصصة: salt(32hex)$sha256(64hex)  ← تطبيق سطح المكتب
+      - bcrypt: $2a$ / $2b$ / $2y$
+    """
+    if not plain or not hashed:
+        return False
+
+    # 1) bcrypt
+    if hashed.startswith("$2a$") or hashed.startswith("$2b$") or hashed.startswith("$2y$"):
+        try:
+            return pwd_context.verify(plain, hashed)
+        except Exception:
+            return False
+
+    # 2) الصيغة المخصصة (salt$sha256)
+    if "$" in hashed and len(hashed) == 97:
+        return _verify_custom_sha256(plain, hashed)
+
+    # 3) صيغ أخرى غير معروفة
+    return False
 
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    """
+    ينشئ hash بصيغة تطبيق سطح المكتب: salt$sha256
+    هذه الصيغة متوافقة مع كل من API وتطبيق سطح المكتب.
+    """
+    salt_hex = secrets.token_hex(16)  # 16 bytes → 32 hex chars
+    digest = hashlib.sha256((salt_hex + plain).encode("utf-8")).hexdigest()
+    return f"{salt_hex}${digest}"
 
 
+# ============================================================
+# JWT
+# ============================================================
 def create_access_token(parent_id: int, full_name: str = "") -> tuple[str, int]:
-    """ينشئ access token. يرجع (token, expires_in_seconds)."""
     expires_delta = timedelta(minutes=settings.access_token_expire_minutes)
     expire = datetime.now(timezone.utc) + expires_delta
     payload = {
@@ -49,7 +128,6 @@ def create_refresh_token(parent_id: int) -> str:
 
 
 def decode_token(token: str) -> dict | None:
-    """يفك التوكن. يرجع payload أو None."""
     try:
         return jwt.decode(
             token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
