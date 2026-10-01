@@ -9,7 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
-
+from app.sync_utils import (
+    build_sync_update_set,
+    fill_sync_columns_for_insert,
+)
 from app.deps import get_current_parent, get_db
 from app.models import Parent, ParentDevice
 from app.security import (
@@ -89,10 +92,7 @@ def _register_device_safe(
     device_type: str | None,
     app_version: str | None,
 ) -> None:
-    """
-    تسجيل الجهاز بأمان — لا يفشل تسجيل الدخول أبداً.
-    يكتشف أعمدة sync_* NOT NULL تلقائياً ويعبّئها بقيم افتراضية.
-    """
+    """تسجيل الجهاز بأمان — لا يفشل تسجيل الدخول أبداً."""
     try:
         now = datetime.utcnow()
         token = (device_token or "")[:255]
@@ -107,23 +107,19 @@ def _register_device_safe(
         ).scalar()
 
         if existing_id:
-            db.execute(
-                text(
-                    "UPDATE parent_devices SET "
-                    "last_login = :now, is_active = TRUE, app_version = :ver "
-                    "WHERE id = :id"
-                ),
-                {"now": now, "ver": app_version, "id": existing_id},
-            )
+            sets, extra = build_sync_update_set(db, "parent_devices")
+            set_clause = ", ".join(["last_login = :now", "is_active = TRUE",
+                                     "app_version = :ver", *sets])
+            sql = f"UPDATE parent_devices SET {set_clause} WHERE id = :id"
+            db.execute(text(sql), {
+                "now": now, "ver": app_version, "id": existing_id, **extra
+            })
             db.commit()
             logger.info("Device updated: id=%s parent=%s", existing_id, parent_id)
             return
 
-        # 2) جهاز جديد — اكتشف الأعمدة
-        inspector = inspect(db.bind)
-        columns = inspector.get_columns("parent_devices")
-
-        values: dict = {
+        # 2) جهاز جديد — جهّز القيم مع أعمدة sync
+        values = {
             "parent_id": parent_id,
             "device_token": token,
             "device_type": device_type,
@@ -131,52 +127,21 @@ def _register_device_safe(
             "last_login": now,
             "is_active": True,
         }
-
-        # عبّئ الأعمدة الإضافية الإلزامية
-        for col in columns:
-            name = col["name"]
-            if name in values:
-                continue
-            nullable = col.get("nullable", True)
-            has_default = col.get("default") is not None
-            if nullable or has_default:
-                continue
-
-            # أعمدة NOT NULL بدون default → نولّد لها قيماً
-            if name == "sync_uuid" or name.endswith("_uuid"):
-                values[name] = str(uuid.uuid4())
-            elif name in ("sync_version",):
-                values[name] = 1
-            elif name in ("sync_deleted", "is_deleted"):
-                values[name] = False
-            elif name in ("sync_updated_at", "sync_created_at",
-                          "created_at", "updated_at"):
-                values[name] = now
-            elif name in ("sync_source", "source"):
-                values[name] = "parent-api"
-            elif name.startswith("sync_"):
-                # أي عمود sync غير معروف → قيمة نصية آمنة
-                values[name] = "parent-api"
-            else:
-                # عمود آخر غير متوقع
-                logger.warning("Unknown NOT NULL column: %s", name)
+        values = fill_sync_columns_for_insert(db, "parent_devices", values)
 
         cols_str = ", ".join(values.keys())
         placeholders = ", ".join(f":{k}" for k in values.keys())
 
         db.execute(
-            text(
-                f"INSERT INTO parent_devices ({cols_str}) "
-                f"VALUES ({placeholders})"
-            ),
+            text(f"INSERT INTO parent_devices ({cols_str}) VALUES ({placeholders})"),
             values,
         )
         db.commit()
-        logger.info("Device registered: parent=%s cols=%s", parent_id, list(values.keys()))
+        logger.info("Device registered: parent=%s cols=%s",
+                    parent_id, list(values.keys()))
 
     except Exception as exc:
         db.rollback()
-        # ✅ لا نُفشل تسجيل الدخول بسبب الجهاز
         logger.warning("Device registration failed (non-fatal): %s", exc)
 
 
