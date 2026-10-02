@@ -86,7 +86,35 @@ def term_grades(
     db: Session = Depends(get_db),
     term: int = Query(...),
 ):
-    subjects = db.execute(select(Subject).order_by(Subject.id)).scalars().all()
+    # ✅ 1) اجلب فقط معرّفات المواد التي للطالب فيها تقييمات أو امتحانات
+    monthly_subject_ids = db.execute(
+        select(MonthlyEvaluation.subject_id)
+        .where(
+            MonthlyEvaluation.student_id == student.id,
+            MonthlyEvaluation.term == term,
+        )
+        .distinct()
+    ).scalars().all()
+
+    exam_subject_ids = db.execute(
+        select(TermExamScore.subject_id)
+        .where(
+            TermExamScore.student_id == student.id,
+            TermExamScore.term == term,
+        )
+        .distinct()
+    ).scalars().all()
+
+    # دمج + إزالة التكرار
+    subject_ids = sorted(set(monthly_subject_ids) | set(exam_subject_ids))
+
+    if not subject_ids:
+        return ok([])
+
+    # 2) اجلب تفاصيل هذه المواد فقط
+    subjects = db.execute(
+        select(Subject).where(Subject.id.in_(subject_ids)).order_by(Subject.id)
+    ).scalars().all()
 
     result = []
     for subj in subjects:
@@ -102,7 +130,12 @@ def term_grades(
         monthly_total = sum(float(r.total_month_score) for r in monthly_rows)
 
         # ✅ (مجموع 3 أشهر) ÷ 3 ÷ 5 = من 20
-        coursework_score = (monthly_total / 15.0) if monthly_rows else 0.0
+        # أو ديناميكي (متوسط الأشهر المرصودة) ÷ 5
+        months_count = len(monthly_rows)
+        if months_count > 0:
+            coursework_score = (monthly_total / months_count) / 5.0
+        else:
+            coursework_score = 0.0
         coursework_max = 20.0
 
         # ==================== نهاية الفصل ====================
@@ -143,7 +176,39 @@ def final_grades(
     student: Student = Depends(get_owned_student),
     db: Session = Depends(get_db),
 ):
-    subjects = db.execute(select(Subject).order_by(Subject.id)).scalars().all()
+    # ✅ 1) اجلب فقط المواد التي للطالب فيها تقييمات أو امتحانات (في أي فصل)
+    monthly_ids = db.execute(
+        select(MonthlyEvaluation.subject_id)
+        .where(MonthlyEvaluation.student_id == student.id)
+        .distinct()
+    ).scalars().all()
+
+    exam_ids = db.execute(
+        select(TermExamScore.subject_id)
+        .where(TermExamScore.student_id == student.id)
+        .distinct()
+    ).scalars().all()
+
+    subject_ids = sorted(set(monthly_ids) | set(exam_ids))
+
+    if not subject_ids:
+        return ok(
+            {
+                "subjects": [],
+                "total_score": 0.0,
+                "total_max": 0.0,
+                "percentage": 0.0,
+                "overall_grade": "—",
+                "class_rank": None,
+                "class_size": None,
+                "final_result": "—",
+            }
+        )
+
+    # 2) اجلب المواد فقط
+    subjects = db.execute(
+        select(Subject).where(Subject.id.in_(subject_ids)).order_by(Subject.id)
+    ).scalars().all()
 
     subject_rows = []
     total_score = 0.0
@@ -171,9 +236,7 @@ def final_grades(
 
     percentage = (total_score / total_max * 100) if total_max else 0.0
     overall = _overall_grade(percentage)
-    final_result = (
-        "ناجح" if percentage >= 50 else "راسب"
-    )
+    final_result = "ناجح" if percentage >= 50 else "راسب"
 
     return ok(
         {
