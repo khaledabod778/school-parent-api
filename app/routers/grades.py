@@ -81,6 +81,7 @@ def monthly_grades(
 # Term Grades
 # ============================================================
 @router.get("/{student_id}/grades/term")
+@router.get("/{student_id}/grades/term")
 def term_grades(
     student: Student = Depends(get_owned_student),
     db: Session = Depends(get_db),
@@ -90,14 +91,17 @@ def term_grades(
 
     result = []
     for subj in subjects:
-        # محصلة الأعمال = مجموع التقييمات الشهرية (3 أشهر) للفصل المحدد
-        monthly_total = db.execute(
-            select(func_sum(MonthlyEvaluation.total_month_score)).where(
+        # ✅ احسب محصلة الأعمال من Python
+        monthly_rows = db.execute(
+            select(MonthlyEvaluation).where(
                 MonthlyEvaluation.student_id == student.id,
                 MonthlyEvaluation.subject_id == subj.id,
                 MonthlyEvaluation.term == term,
             )
-        ).scalar() or 0
+        ).scalars().all()
+
+        monthly_total = sum(float(r.total_month_score) for r in monthly_rows)
+        coursework_score = monthly_total / 3.0 if monthly_rows else 0.0
 
         # نهاية الفصل
         exam_score = db.execute(
@@ -108,7 +112,6 @@ def term_grades(
             )
         ).scalar() or 0
 
-        coursework_score = float(monthly_total) / 3.0 if monthly_total else 0.0
         coursework_max = 20.0
         exam_max = 30.0
         total = coursework_score + float(exam_score)
@@ -187,23 +190,29 @@ def final_grades(
 # ============================================================
 # Helpers
 # ============================================================
-def func_sum(col):
-    from sqlalchemy import func
-    return func.sum(col)
 
 
 def _term_total(db: Session, student_id: int, subject_id: int, term: int) -> float:
-    monthly = db.execute(
-        select(func_sum(MonthlyEvaluation.total_month_score)).where(
+    """
+    يحسب مجموع الفصل (محصلة الأعمال + نهاية الفصل).
+    يحسب total_month_score في Python بدل الاعتماد على DB.
+    """
+    from sqlalchemy import select as sa_select
+
+    rows = db.execute(
+        sa_select(MonthlyEvaluation).where(
             MonthlyEvaluation.student_id == student_id,
             MonthlyEvaluation.subject_id == subject_id,
             MonthlyEvaluation.term == term,
         )
-    ).scalar() or 0
-    coursework = float(monthly) / 3.0 if monthly else 0.0
+    ).scalars().all()
+
+    # مجموع كل التقييمات الشهرية (3 أشهر) ثم نقسم على 3 لمتوسط المحصلة
+    monthly_total = sum(float(r.total_month_score) for r in rows)
+    coursework = monthly_total / 3.0 if rows else 0.0
 
     exam = db.execute(
-        select(TermExamScore.exam_score).where(
+        sa_select(TermExamScore.exam_score).where(
             TermExamScore.student_id == student_id,
             TermExamScore.subject_id == subject_id,
             TermExamScore.term == term,
