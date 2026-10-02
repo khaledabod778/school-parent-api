@@ -81,7 +81,6 @@ def monthly_grades(
 # Term Grades
 # ============================================================
 @router.get("/{student_id}/grades/term")
-@router.get("/{student_id}/grades/term")
 def term_grades(
     student: Student = Depends(get_owned_student),
     db: Session = Depends(get_db),
@@ -91,7 +90,7 @@ def term_grades(
 
     result = []
     for subj in subjects:
-        # ✅ احسب محصلة الأعمال من Python
+        # ==================== المحصلة ====================
         monthly_rows = db.execute(
             select(MonthlyEvaluation).where(
                 MonthlyEvaluation.student_id == student.id,
@@ -101,9 +100,12 @@ def term_grades(
         ).scalars().all()
 
         monthly_total = sum(float(r.total_month_score) for r in monthly_rows)
-        coursework_score = monthly_total / 3.0 if monthly_rows else 0.0
 
-        # نهاية الفصل
+        # ✅ (مجموع 3 أشهر) ÷ 3 ÷ 5 = من 20
+        coursework_score = (monthly_total / 15.0) if monthly_rows else 0.0
+        coursework_max = 20.0
+
+        # ==================== نهاية الفصل ====================
         exam_score = db.execute(
             select(TermExamScore.exam_score).where(
                 TermExamScore.student_id == student.id,
@@ -111,9 +113,9 @@ def term_grades(
                 TermExamScore.term == term,
             )
         ).scalar() or 0
-
-        coursework_max = 20.0
         exam_max = 30.0
+
+        # ==================== المجموع ====================
         total = coursework_score + float(exam_score)
         total_max = 50.0
 
@@ -194,12 +196,15 @@ def final_grades(
 
 def _term_total(db: Session, student_id: int, subject_id: int, term: int) -> float:
     """
-    يحسب مجموع الفصل (محصلة الأعمال + نهاية الفصل).
-    يحسب total_month_score في Python بدل الاعتماد على DB.
+    يحسب مجموع الفصل:
+      المحصلة = (مجموع 3 أشهر) ÷ 3 ÷ 5   → من 20
+      نهاية الفصل = exam_score           → من 30
+      المجموع الكلي                      → من 50
     """
     from sqlalchemy import select as sa_select
 
-    rows = db.execute(
+    # 1) المحصلة: مجموع 3 أشهر
+    monthly_rows = db.execute(
         sa_select(MonthlyEvaluation).where(
             MonthlyEvaluation.student_id == student_id,
             MonthlyEvaluation.subject_id == subject_id,
@@ -207,10 +212,12 @@ def _term_total(db: Session, student_id: int, subject_id: int, term: int) -> flo
         )
     ).scalars().all()
 
-    # مجموع كل التقييمات الشهرية (3 أشهر) ثم نقسم على 3 لمتوسط المحصلة
-    monthly_total = sum(float(r.total_month_score) for r in rows)
-    coursework = monthly_total / 3.0 if rows else 0.0
+    monthly_total = sum(float(r.total_month_score) for r in monthly_rows)
 
+    # ✅ المعادلة الصحيحة: (مجموع 3 أشهر) ÷ 3 ÷ 5 = المجموع ÷ 15
+    coursework = (monthly_total / 15.0) if monthly_rows else 0.0
+
+    # 2) نهاية الفصل
     exam = db.execute(
         sa_select(TermExamScore.exam_score).where(
             TermExamScore.student_id == student_id,
