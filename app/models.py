@@ -160,7 +160,16 @@ class MonthlyEvaluation(Base):
     oral_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
     homework_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
     attendance_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
-    total_month_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    # ⚠️ total_month_score غير موجود في DB الفعلي — نحسبه في Python
+
+    @property
+    def total_month_score(self) -> Decimal:
+        return (
+            (self.written_score or Decimal(0))
+            + (self.oral_score or Decimal(0))
+            + (self.homework_score or Decimal(0))
+            + (self.attendance_score or Decimal(0))
+        )
 
 
 class TermExamScore(Base):
